@@ -1,4 +1,4 @@
-name: build
+name: build and release
 
 on:
   push:
@@ -19,22 +19,10 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: "24.x"
-      - name: Install Yarn
-        run: npm install -g yarn
-      - name: Get yarn cache directory path
-        id: yarn-cache-dir-path
-        run: echo "dir=$(yarn cache dir)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v5
-        id: yarn-cache
-        with:
-          path: ${{ steps.yarn-cache-dir-path.outputs.dir }}
-          key: ${{ runner.os }}-yarn-${{ hashFiles('**/yarn.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-yarn-
-      - name: Install Deps
-        run: yarn install --pure-lockfile
+      - name: Install dependencies
+        run: npm ci
       - name: Build
-        run: yarn build
+        run: npm run build
       - name: Commit dist/ changes
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
@@ -47,3 +35,10 @@ jobs:
             git commit -m "chore: update dist/ build artifacts"
             git push
           fi
+      - name: Move v1 tag to HEAD
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -fa v1 -m "v1 compatible release"
+          git push -f origin v1
