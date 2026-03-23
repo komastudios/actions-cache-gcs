@@ -1,10 +1,14 @@
-# actions-s3-cache
+# actions-cache-gcs
 
-This action enables caching dependencies to s3 compatible storage, e.g. minio, AWS S3
+This action enables caching dependencies to Google Cloud Storage, with native support for Workload Identity Federation and Application Default Credentials.
 
-It also has github [actions/cache@v5](https://github.com/actions/cache) fallback if s3 save & restore fails
+It also has github [actions/cache@v5](https://github.com/actions/cache) fallback if GCS save & restore fails.
+
+Fork of [tespkg/actions-cache](https://github.com/tespkg/actions-cache), replacing the S3/MinIO backend with native GCS.
 
 ## Usage
+
+Authenticate with [google-github-actions/auth](https://github.com/google-github-actions/auth) before using this action. The GCS client picks up credentials automatically via Application Default Credentials.
 
 ```yaml
 name: dev ci
@@ -15,21 +19,25 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+  id-token: write
+
 jobs:
   build_test:
     runs-on: [ubuntu-latest]
 
     steps:
-      - uses: tespkg/actions-cache@v1
+      - uses: google-github-actions/auth@v2
         with:
-          endpoint: play.min.io # optional, default s3.amazonaws.com
-          insecure: false # optional, use http instead of https. default false
-          accessKey: "Q3AM3UQ867SPQQA43P2F" # required
-          secretKey: "zuf+tfteSlswRu7BJ86wekitnifILbZam1KYY3TG" # required
-          sessionToken: "AQoDYXdzEJraDcqRtz123" # optional
-          bucket: actions-cache # required
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - uses: komastudios/actions-cache-gcs@v1
+        with:
+          bucket: my-cache-bucket # required
           use-fallback: true # optional, use github actions cache fallback, default true
-          retry: true # optional, enable retry on failure s3 operations, default false
+          retry: true # optional, enable retry on failure, default false
 
           # actions/cache compatible properties: https://github.com/actions/cache
           key: ${{ runner.os }}-yarn-${{ hashFiles('**/yarn.lock') }}
@@ -40,34 +48,12 @@ jobs:
             ${{ runner.os }}-yarn-
 ```
 
-You can also set env instead of using `with`:
-
-```yaml
-      - uses: tespkg/actions-cache@v1
-        env:
-          AWS_ACCESS_KEY_ID: "Q3AM3UQ867SPQQA43P2F"
-          AWS_SECRET_ACCESS_KEY: "zuf+tfteSlswRu7BJ86wekitnifILbZam1KYY3TG"
-          # AWS_SESSION_TOKEN: "xxx"
-          AWS_REGION: "us-east-1"
-        with:
-          endpoint: play.min.io
-          bucket: actions-cache
-          use-fallback: false
-          key: test-${{ runner.os }}-${{ github.run_id }}
-          path: |
-            test-cache
-            ~/test-cache
-```
-
 To write to the cache only:
 
 ```yaml
-      - uses: tespkg/actions-cache/save@v1
+      - uses: komastudios/actions-cache-gcs/save@v1
         with:
-          accessKey: "Q3AM3UQ867SPQQA43P2F" # required
-          secretKey: "zuf+tfteSlswRu7BJ86wekitnifILbZam1KYY3TG" # required
-          bucket: actions-cache # required
-          # actions/cache compatible properties: https://github.com/actions/cache
+          bucket: my-cache-bucket
           key: ${{ runner.os }}-yarn-${{ hashFiles('**/yarn.lock') }}
           path: |
             node_modules
@@ -76,41 +62,53 @@ To write to the cache only:
 To restore from the cache only:
 
 ```yaml
-      - uses: tespkg/actions-cache/restore@v1
+      - uses: komastudios/actions-cache-gcs/restore@v1
         with:
-          accessKey: "Q3AM3UQ867SPQQA43P2F" # required
-          secretKey: "zuf+tfteSlswRu7BJ86wekitnifILbZam1KYY3TG" # required
-          bucket: actions-cache # required
-          # actions/cache compatible properties: https://github.com/actions/cache
+          bucket: my-cache-bucket
           key: ${{ runner.os }}-yarn-${{ hashFiles('**/yarn.lock') }}
           path: |
             node_modules
 ```
 
-To check if cache hits and size is not zero without downloading:
+To fail the workflow if no cache entry is found:
 
 ```yaml
-      - name: Check cache
-        id: cache
-        uses: tespkg/actions-cache/check@v1
+      - uses: komastudios/actions-cache-gcs/restore@v1
         with:
-          accessKey: "Q3AM3UQ867SPQQA43P2F" # required
-          secretKey: "zuf+tfteSlswRu7BJ86wekitnifILbZam1KYY3TG" # required
-          bucket: actions-cache # required
+          bucket: my-cache-bucket
+          fail-on-cache-miss: true
+          key: ${{ runner.os }}-yarn-${{ hashFiles('**/yarn.lock') }}
+          path: |
+            node_modules
+```
+
+To check if a cache exists without downloading:
+
+```yaml
+      - uses: komastudios/actions-cache-gcs@v1
+        id: cache
+        with:
+          bucket: my-cache-bucket
           lookup-only: true
           key: ${{ runner.os }}-yarn-${{ hashFiles('**/yarn.lock') }}
           path: |
             node_modules
-
-      - name: verify cache hit
-        env:
-          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
-          CACHE_SIZE: ${{ steps.cache.outputs.cache-size }}
-        run: |
-          echo "CACHE_HIT $CACHE_HIT"
-          echo "CACHE_SIZE $CACHE_SIZE"
 ```
 
+## Inputs
+
+| Input | Description | Required | Default |
+|---|---|---|---|
+| `bucket` | GCS bucket name | Yes | |
+| `project` | GCP project ID (uses ADC project if omitted) | No | |
+| `path` | Files, directories, and wildcard patterns to cache and restore | Yes | |
+| `key` | An explicit key for restoring and saving the cache | Yes | |
+| `restore-keys` | Ordered list of prefix keys to try if `key` has no exact match | No | |
+| `use-fallback` | Fall back to github actions/cache on GCS failure | No | `true` |
+| `fail-on-cache-miss` | Fail the workflow if no cache entry is found | No | `false` |
+| `lookup-only` | Check if a cache entry exists but don't download it | No | `false` |
+| `retry` | Enable retry on GCS operation failure | No | `false` |
+| `retry-count` | Number of retries on failure | No | `3` |
 
 ## Outputs
 
@@ -122,18 +120,13 @@ To check if cache hits and size is not zero without downloading:
 
 ## Restore keys
 
-`restore-keys` works similar to how github's `@actions/cache@v5` works: It search each item in `restore-keys`
-as prefix in object names and use the latest one
-
-To restore from the cache using a `restore-key` prefix if the `key` restore fails:
+`restore-keys` works similar to how github's `@actions/cache@v5` works: it searches each item in `restore-keys`
+as a prefix in object names and uses the latest one.
 
 ```yaml
-      - uses: tespkg/actions-cache/restore@v1
+      - uses: komastudios/actions-cache-gcs/restore@v1
         with:
-          accessKey: "Q3AM3UQ867SPQQA43P2F" # required
-          secretKey: "zuf+tfteSlswRu7BJ86wekitnifILbZam1KYY3TG" # required
-          bucket: actions-cache # required
-          # actions/cache compatible properties: https://github.com/actions/cache
+          bucket: my-cache-bucket
           key: ${{ runner.os }}-yarn-${{ hashFiles('**/yarn.lock') }}
           restore-keys: |
             ${{ runner.os }}-yarn-
@@ -142,32 +135,24 @@ To restore from the cache using a `restore-key` prefix if the `key` restore fail
             node_modules
 ```
 
-If a match is found using one of the `restore-keys` options, then `cache-hit` will be FALSE but the
-`cache-matched-key` output will be set to the key that matched. See the
-[actions/cache](https://github.com/actions/cache/blob/main/restore/README.md#outputs) notes.
+If a match is found using one of the `restore-keys` options, then `cache-hit` will be `false` but the
+`cache-matched-key` output will be set to the key that matched.
 
-## Amazon S3 permissions
+## GCS permissions
 
-When using this with Amazon S3, the following permissions are necessary:
+The service account used for authentication needs the following IAM permissions on the cache bucket:
 
- - `s3:PutObject`
- - `s3:GetObject`
- - `s3:ListBucket`
- - `s3:GetBucketLocation`
- - `s3:ListBucketMultipartUploads`
- - `s3:ListMultipartUploadParts`
+- `storage.objects.create`
+- `storage.objects.get`
+- `storage.objects.list`
+- `storage.objects.delete`
 
-# Note on release
+The predefined role `roles/storage.objectAdmin` covers all of these, or use `roles/storage.objectUser` for a narrower grant.
+
+## Note on release
 
 This project follows semantic versioning. Backward incompatible changes will
 increase major version.
 
 There is also the `v1` compatible tag that's always pinned to the latest
 `v1.x.y` release.
-
-It's done using:
-
-```
-git tag -a v1 -f -m "v1 compatible release"
-git push -f --tags
-```
