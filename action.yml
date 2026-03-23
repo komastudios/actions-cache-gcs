@@ -11,6 +11,14 @@ inputs:
   path:
     description: "A list of files, directories, and wildcard patterns to cache and restore"
     required: true
+  prefix:
+    description: "Prefix prepended to all object keys in the GCS bucket"
+    required: false
+    default: ""
+  normalize_keys:
+    description: "Replace backslashes with forward slashes in GCS object keys"
+    required: false
+    default: "true"
   key:
     description: "An explicit key for restoring and saving the cache"
     required: true

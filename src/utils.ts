@@ -20,6 +20,20 @@ export function newGCSClient(): Storage {
   return new Storage(project ? { projectId: project } : undefined);
 }
 
+export function resolveGCSKey(key: string): string {
+  let prefix = core.getInput("prefix");
+  const normalize = getInputAsBoolean("normalize_keys");
+
+  if (prefix && !prefix.endsWith("/")) {
+    prefix += "/";
+  }
+  let resolved = prefix ? prefix + key : key;
+  if (normalize) {
+    resolved = resolved.replace(/\\/g, "/").replace(/\/+/g, "/");
+  }
+  return resolved;
+}
+
 export function withRetry<A>(name: string, fn: () => Promise<A>): Promise<A> {
   if (getInputAsBoolean("retry")) {
     return pRetry(fn, {
@@ -101,14 +115,18 @@ export async function findObject(
   restoreKeys: string[],
   compressionMethod: CompressionMethod
 ): Promise<FindObjectResult> {
+  const resolvedKey = resolveGCSKey(key);
   core.debug("Key: " + JSON.stringify(key));
+  core.debug("Resolved key: " + JSON.stringify(resolvedKey));
   core.debug("Restore keys: " + JSON.stringify(restoreKeys));
 
-  core.debug(`Finding exact match for: ${key}`);
-  const keyMatches = await listObjects(storage, bucket, key);
+  core.debug(`Finding exact match for: ${resolvedKey}`);
+  const keyMatches = await listObjects(storage, bucket, resolvedKey);
   core.debug(`Found ${JSON.stringify(keyMatches.map((f) => f.name), null, 2)}`);
   if (keyMatches.length > 0) {
-    const exactMatch = keyMatches.find((f) => f.name.startsWith(key + "/"));
+    const exactMatch = keyMatches.find((f) =>
+      f.name.startsWith(resolvedKey + "/")
+    );
     if (exactMatch) {
       core.debug(
         `Found an exact match; using ${JSON.stringify({ name: exactMatch.name, matchingKey: key })}`
@@ -119,9 +137,10 @@ export async function findObject(
   core.debug(`Didn't find an exact match`);
 
   for (const restoreKey of restoreKeys) {
+    const resolvedRestoreKey = resolveGCSKey(restoreKey);
     const fn = utils.getCacheFileName(compressionMethod);
-    core.debug(`Finding object with prefix: ${restoreKey}`);
-    let objects = await listObjects(storage, bucket, restoreKey);
+    core.debug(`Finding object with prefix: ${resolvedRestoreKey}`);
+    let objects = await listObjects(storage, bucket, resolvedRestoreKey);
     objects = objects.filter((f) => f.name.includes(fn));
     core.debug(
       `Found ${JSON.stringify(objects.map((f) => f.name), null, 2)}`
@@ -203,7 +222,7 @@ export async function saveCache(standalone: boolean) {
         await listTar(archivePath, compressionMethod);
       }
 
-      const object = key + "/" + cacheFileName;
+      const object = resolveGCSKey(key) + "/" + cacheFileName;
 
       core.info(`Uploading tar to GCS. Bucket: ${bucket}, Object: ${object}`);
       await withRetry("upload", () =>
