@@ -102,6 +102,8 @@ To check if a cache exists without downloading:
 | `bucket` | GCS bucket name | Yes | |
 | `project` | GCP project ID (uses ADC project if omitted) | No | |
 | `path` | Files, directories, and wildcard patterns to cache and restore | Yes | |
+| `prefix` | Prefix prepended to all object keys in the GCS bucket | No | `""` |
+| `normalize_keys` | Replace backslashes with forward slashes in GCS object keys | No | `true` |
 | `key` | An explicit key for restoring and saving the cache | Yes | |
 | `restore-keys` | Ordered list of prefix keys to try if `key` has no exact match | No | |
 | `use-fallback` | Fall back to github actions/cache on GCS failure | No | `true` |
@@ -147,12 +149,11 @@ The service account used for authentication needs the following IAM permissions 
 - `storage.objects.list`
 - `storage.objects.delete`
 
-The predefined role `roles/storage.objectAdmin` covers all of these, or use `roles/storage.objectUser` for a narrower grant.
+The predefined role `roles/storage.objectUser` covers all of these and is the recommended choice.
 
 ## Note on release
 
 This project follows semantic versioning. Backward incompatible changes will
 increase major version.
 
-There is also the `v1` compatible tag that's always pinned to the latest
-`v1.x.y` release.
+The `v1` tag is automatically pinned to the latest commit on `main`.
