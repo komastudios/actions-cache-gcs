@@ -1,29 +1,21 @@
 name: release
 
 on:
-  release:
-    types: [published]
+  push:
+    branches: [main]
 
 permissions:
   contents: write
 
 jobs:
-  update-major-tag:
+  update-v1-tag:
     runs-on: ubuntu-latest
-    if: startsWith(github.event.release.tag_name, 'v')
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-      - name: Update major version tag
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+      - name: Move v1 tag to HEAD
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          # Extract major version (e.g., v1.9.0 -> v1)
-          MAJOR_TAG="${RELEASE_TAG%%.*}"
-          echo "Moving ${MAJOR_TAG} tag to ${RELEASE_TAG}"
-          git tag -fa "${MAJOR_TAG}" -m "${MAJOR_TAG} compatible release"
-          git push -f origin "${MAJOR_TAG}"
+          git tag -fa v1 -m "v1 compatible release"
+          git push -f origin v1
