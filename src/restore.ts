@@ -10,12 +10,11 @@ import {
   getInputAsArray,
   getInputAsBoolean,
   isGhes,
-  newMinio,
+  newGCSClient,
   setCacheHitOutput,
   setCacheMatchedKeyOutput,
   setCacheSizeOutput,
   saveMatchedKey,
-  getInput,
   withRetry,
 } from "./utils";
 
@@ -26,96 +25,95 @@ async function restoreCache() {
     const bucket = core.getInput("bucket", { required: true });
     const key = core.getInput("key", { required: true });
     const useFallback = getInputAsBoolean("use-fallback");
+    const failOnCacheMiss = getInputAsBoolean("fail-on-cache-miss");
     const paths = getInputAsArray("path");
     const restoreKeys = getInputAsArray("restore-keys");
     const lookupOnly = getInputAsBoolean("lookup-only");
 
     try {
-      // Inputs are re-evaluted before the post action, so we want to store the original values
       core.saveState(State.PrimaryKey, key);
-      core.saveState(
-        State.AccessKey,
-        getInput("accessKey", "AWS_ACCESS_KEY_ID"),
-      );
-      core.saveState(
-        State.SecretKey,
-        getInput("secretKey", "AWS_SECRET_ACCESS_KEY"),
-      );
-      core.saveState(
-        State.SessionToken,
-        getInput("sessionToken", "AWS_SESSION_TOKEN"),
-      );
-      core.saveState(State.Region, getInput("region", "AWS_REGION"));
 
-      const mc = newMinio();
+      const storage = newGCSClient();
 
       const compressionMethod = await utils.getCompressionMethod();
       const cacheFileName = utils.getCacheFileName(compressionMethod);
       const archivePath = path.join(
         await utils.createTempDirectory(),
-        cacheFileName,
+        cacheFileName
       );
 
       const { item: obj, matchingKey } = await findObject(
-        mc,
+        storage,
         bucket,
         key,
         restoreKeys,
-        compressionMethod,
+        compressionMethod
       );
       core.debug("found cache object");
       saveMatchedKey(matchingKey);
       const cacheHit = matchingKey === key;
+      const size = Number(obj.metadata?.size ?? 0);
       setCacheHitOutput(cacheHit);
-      setCacheSizeOutput(obj.size);
+      setCacheSizeOutput(size);
       setCacheMatchedKeyOutput(matchingKey);
       if (lookupOnly) {
-        if (cacheHit && obj.size > 0) {
+        if (cacheHit && size > 0) {
           core.info(
-            `Cache Hit. NOT Downloading cache from s3 because lookup-only is set. bucket: ${bucket}, object: ${obj.name}`,
+            `Cache Hit. NOT downloading cache from GCS because lookup-only is set. Bucket: ${bucket}, Object: ${obj.name}`
           );
         } else {
           core.info(
-            `Cache Miss or cache size is 0. NOT Downloading cache from s3 because lookup-only is set. bucket: ${bucket}, object: ${obj.name}`,
-          )
+            `Cache Miss or cache size is 0. NOT downloading cache from GCS because lookup-only is set. Bucket: ${bucket}, Object: ${obj.name}`
+          );
         }
       } else {
         core.info(
-          `Downloading cache from s3 to ${archivePath}. bucket: ${bucket}, object: ${obj.name}`,
+          `Downloading cache from GCS to ${archivePath}. Bucket: ${bucket}, Object: ${obj.name}`
         );
-        await withRetry("fGetObject", () => mc.fGetObject(bucket, obj.name!, archivePath));
+        await withRetry("download", () =>
+          obj.download({ destination: archivePath })
+        );
 
         if (core.isDebug()) {
           await listTar(archivePath, compressionMethod);
         }
 
-        core.info(`Cache Size: ${formatSize(obj.size)} (${obj.size} bytes)`);
+        core.info(`Cache Size: ${formatSize(size)} (${size} bytes)`);
 
         await extractTar(archivePath, compressionMethod);
-        core.info("Cache restored from s3 successfully");
+        core.info("Cache restored from GCS successfully");
       }
     } catch (e) {
-      core.info("Restore s3 cache failed: " + e.message);
+      core.info("Restore GCS cache failed: " + e.message);
       setCacheHitOutput(false);
       setCacheMatchedKeyOutput("");
+
+      let restored = false;
       if (useFallback) {
         if (isGhes()) {
-          core.warning("Cache fallback is not supported on Github Enterpise.");
+          core.warning("Cache fallback is not supported on Github Enterprise.");
         } else {
           core.info("Restore cache using fallback cache");
           const fallbackMatchingKey = await cache.restoreCache(
             paths,
             key,
-            restoreKeys,
+            restoreKeys
           );
           if (fallbackMatchingKey) {
             setCacheHitOutput(fallbackMatchingKey === key);
             setCacheMatchedKeyOutput(fallbackMatchingKey);
             core.info("Fallback cache restored successfully");
+            restored = true;
           } else {
             core.info("Fallback cache restore failed");
           }
         }
+      }
+
+      if (!restored && failOnCacheMiss) {
+        core.setFailed(
+          `Cache entry not found for keys: ${JSON.stringify([key, ...restoreKeys])}`
+        );
       }
     }
   } catch (e) {

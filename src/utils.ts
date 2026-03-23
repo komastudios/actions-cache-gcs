@@ -1,12 +1,12 @@
 import { CompressionMethod } from "@actions/cache/lib/internal/constants";
 import * as utils from "@actions/cache/lib/internal/cacheUtils";
 import * as core from "@actions/core";
-import * as minio from "minio";
+import { Storage, File } from "@google-cloud/storage";
 import { State } from "./state";
 import path from "path";
-import {createTar, listTar} from "@actions/cache/lib/internal/tar";
+import { createTar, listTar } from "@actions/cache/lib/internal/tar";
 import * as cache from "@actions/cache";
-import pRetry from 'p-retry';
+import pRetry from "p-retry";
 
 export function isGhes(): boolean {
   const ghUrl = new URL(
@@ -15,37 +15,9 @@ export function isGhes(): boolean {
   return ghUrl.hostname.toUpperCase() !== "GITHUB.COM";
 }
 
-export function getInput(key: string, envKey?: string) {
-  let result;
-  if (envKey) {
-    result = process.env[envKey]
-  }
-  if (result === undefined) {
-    result = core.getInput(key);
-  }
-  return result;
-}
-
-export function newMinio({
-  accessKey,
-  secretKey,
-  sessionToken,
-  region,
-}: {
-  accessKey?: string;
-  secretKey?: string;
-  sessionToken?: string;
-  region?: string;
-} = {}) {
-  return new minio.Client({
-    endPoint: core.getInput("endpoint"),
-    port: getInputAsInt("port"),
-    useSSL: !getInputAsBoolean("insecure"),
-    accessKey: accessKey ?? getInput("accessKey", "AWS_ACCESS_KEY_ID"),
-    secretKey: secretKey ?? getInput("secretKey", "AWS_SECRET_ACCESS_KEY"),
-    sessionToken: sessionToken ?? getInput("sessionToken", "AWS_SESSION_TOKEN"),
-    region: region ?? getInput("region", "AWS_REGION"),
-  });
+export function newGCSClient(): Storage {
+  const project = core.getInput("project");
+  return new Storage(project ? { projectId: project } : undefined);
 }
 
 export function withRetry<A>(name: string, fn: () => Promise<A>): Promise<A> {
@@ -110,20 +82,20 @@ export function setCacheHitOutput(isCacheHit: boolean): void {
 }
 
 export function setCacheSizeOutput(cacheSize: number): void {
-  core.setOutput("cache-size", cacheSize.toString())
+  core.setOutput("cache-size", cacheSize.toString());
 }
 
 export function setCacheMatchedKeyOutput(cacheMatchedKey: string): void {
-  core.setOutput("cache-matched-key", cacheMatchedKey)
+  core.setOutput("cache-matched-key", cacheMatchedKey);
 }
 
 type FindObjectResult = {
-  item: minio.BucketItem;
+  item: File;
   matchingKey: string;
 };
 
 export async function findObject(
-  mc: minio.Client,
+  storage: Storage,
   bucket: string,
   key: string,
   restoreKeys: string[],
@@ -133,14 +105,15 @@ export async function findObject(
   core.debug("Restore keys: " + JSON.stringify(restoreKeys));
 
   core.debug(`Finding exact match for: ${key}`);
-  const keyMatches = await listObjects(mc, bucket, key);
-  core.debug(`Found ${JSON.stringify(keyMatches, null, 2)}`);
+  const keyMatches = await listObjects(storage, bucket, key);
+  core.debug(`Found ${JSON.stringify(keyMatches.map((f) => f.name), null, 2)}`);
   if (keyMatches.length > 0) {
-    const exactMatch = keyMatches.find((obj) => obj.name?.startsWith(key + path.sep));
+    const exactMatch = keyMatches.find((f) => f.name.startsWith(key + "/"));
     if (exactMatch) {
-      const result = { item: exactMatch, matchingKey: key };
-      core.debug(`Found an exact match; using ${JSON.stringify(result)}`);
-      return result;
+      core.debug(
+        `Found an exact match; using ${JSON.stringify({ name: exactMatch.name, matchingKey: key })}`
+      );
+      return { item: exactMatch, matchingKey: key };
     }
   }
   core.debug(`Didn't find an exact match`);
@@ -148,50 +121,34 @@ export async function findObject(
   for (const restoreKey of restoreKeys) {
     const fn = utils.getCacheFileName(compressionMethod);
     core.debug(`Finding object with prefix: ${restoreKey}`);
-    let objects = await listObjects(mc, bucket, restoreKey);
-    objects = objects.filter((o) => o.name?.includes(fn));
-    core.debug(`Found ${JSON.stringify(objects, null, 2)}`);
+    let objects = await listObjects(storage, bucket, restoreKey);
+    objects = objects.filter((f) => f.name.includes(fn));
+    core.debug(
+      `Found ${JSON.stringify(objects.map((f) => f.name), null, 2)}`
+    );
     if (objects.length < 1) {
       continue;
     }
-    const sorted = objects.sort(
-      (a, b) => (b.lastModified?.getTime() ?? 0) - (a.lastModified?.getTime() ?? 0)
+    const sorted = objects.sort((a, b) => {
+      const aTime = new Date(a.metadata?.updated ?? 0).getTime();
+      const bTime = new Date(b.metadata?.updated ?? 0).getTime();
+      return bTime - aTime;
+    });
+    core.debug(
+      `Using latest ${JSON.stringify({ name: sorted[0].name, matchingKey: restoreKey })}`
     );
-    const result = { item: sorted[0], matchingKey: restoreKey };
-    core.debug(`Using latest ${JSON.stringify(result)}`);
-    return result;
+    return { item: sorted[0], matchingKey: restoreKey };
   }
   throw new Error("Cache item not found");
 }
 
-export function listObjects(
-  mc: minio.Client,
+export async function listObjects(
+  storage: Storage,
   bucket: string,
   prefix: string
-): Promise<minio.BucketItem[]> {
-  return new Promise((resolve, reject) => {
-    const h = mc.listObjectsV2(bucket, prefix, true);
-    const r: minio.BucketItem[] = [];
-    let resolved = false;
-    const timeout = setTimeout(() => {
-      if (!resolved)
-        reject(new Error("list objects no result after 10 seconds"));
-    }, 10000);
-
-    h.on("data", (obj) => {
-      r.push(obj);
-    });
-    h.on("error", (e) => {
-      resolved = true;
-      reject(e);
-      clearTimeout(timeout)
-    });
-    h.on("end", () => {
-      resolved = true;
-      resolve(r);
-      clearTimeout(timeout)
-    });
-  });
+): Promise<File[]> {
+  const [files] = await storage.bucket(bucket).getFiles({ prefix });
+  return files;
 }
 
 export function saveMatchedKey(matchedKey: string) {
@@ -205,7 +162,7 @@ function getMatchedKey() {
 export function isExactKeyMatch(): boolean {
   const matchedKey = getMatchedKey();
   const inputKey = core.getState(State.PrimaryKey);
-  const result = getMatchedKey() === inputKey;
+  const result = matchedKey === inputKey;
   core.debug(
     `isExactKeyMatch: matchedKey=${matchedKey} inputKey=${inputKey}, result=${result}`
   );
@@ -220,19 +177,15 @@ export async function saveCache(standalone: boolean) {
     }
 
     const bucket = core.getInput("bucket", { required: true });
-    // Inputs are re-evaluted before the post action, so we want the original key
-    const key = standalone ? core.getInput("key", { required: true }) : core.getState(State.PrimaryKey);
+    // Inputs are re-evaluated before the post action, so we want the original key
+    const key = standalone
+      ? core.getInput("key", { required: true })
+      : core.getState(State.PrimaryKey);
     const useFallback = getInputAsBoolean("use-fallback");
     const paths = getInputAsArray("path");
 
     try {
-      const mc = newMinio({
-        // Inputs are re-evaluted before the post action, so we want the original keys & tokens
-        accessKey: standalone ? getInput("accessKey", "AWS_ACCESS_KEY_ID") : core.getState(State.AccessKey),
-        secretKey: standalone ? getInput("secretKey", "AWS_SECRET_ACCESS_KEY") : core.getState(State.SecretKey),
-        sessionToken: standalone ? getInput("sessionToken", "AWS_SESSION_TOKEN") : core.getState(State.SessionToken),
-        region: standalone ? getInput("region", "AWS_REGION") : core.getState(State.Region),
-      });
+      const storage = newGCSClient();
 
       const compressionMethod = await utils.getCompressionMethod();
       const cachePaths = await utils.resolvePaths(paths);
@@ -250,15 +203,17 @@ export async function saveCache(standalone: boolean) {
         await listTar(archivePath, compressionMethod);
       }
 
-      const object = path.join(key, cacheFileName);
+      const object = key + "/" + cacheFileName;
 
-      core.info(`Uploading tar to s3. Bucket: ${bucket}, Object: ${object}`);
-      await withRetry("fPutObject", () => mc.fPutObject(bucket, object, archivePath, {}));
-      core.info("Cache saved to s3 successfully");
+      core.info(`Uploading tar to GCS. Bucket: ${bucket}, Object: ${object}`);
+      await withRetry("upload", () =>
+        storage.bucket(bucket).upload(archivePath, { destination: object })
+      );
+      core.info("Cache saved to GCS successfully");
     } catch (e) {
       if (useFallback) {
         if (isGhes()) {
-          core.warning("Cache fallback is not supported on Github Enterpise.");
+          core.warning("Cache fallback is not supported on Github Enterprise.");
         } else {
           core.info("Saving cache using fallback");
           await cache.saveCache(paths, key);
@@ -266,7 +221,7 @@ export async function saveCache(standalone: boolean) {
         }
       } else {
         core.debug("skipped fallback cache");
-        core.warning("Save s3 cache failed: " + e.message);
+        core.warning("Save GCS cache failed: " + e.message);
       }
     }
   } catch (e) {
